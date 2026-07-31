@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Тест: взлёт дрона, циклический облёт 3 точек с YOLO-поиском объекта класса 'bear'.
-При нахождении — зависание, вывод координат на ArUco-карте, посадка на финиш.
+Тест: взлёт дрона, циклический облёт 2 точек с YOLO-поиском в реальном времени.
+YOLO работает непрерывно во время полёта.
+При нахождении объекта рядом с точкой — вывод координат точки, посадка на финиш.
 При Ctrl+C — безопасная посадка.
 
 Использование: python3 test_yolo_search.py <drone_ip> <password>
@@ -23,10 +24,10 @@ FINISH_Y = 0.0
 WAYPOINTS = [
     (2.0, 0.0),
     (0.0, 2.0),
-    (3.0, 3.0),
 ]
 
 RANDOM_OFFSET_RANGE = 0.3
+WAYPOINT_PROXIMITY_THRESHOLD = 0.5
 
 YOLO_MODEL_NAME = "yolo11n.pt"
 YOLO_CLASS_NAME = "bear"
@@ -39,6 +40,8 @@ import os
 import signal
 import random
 import json
+import threading
+import math
 
 import sverk_interfaces
 import cv2
@@ -49,6 +52,7 @@ FINISH_X = {FINISH_X}
 FINISH_Y = {FINISH_Y}
 WAYPOINTS = {json.dumps(WAYPOINTS)}
 RANDOM_OFFSET_RANGE = {RANDOM_OFFSET_RANGE}
+WAYPOINT_PROXIMITY_THRESHOLD = {WAYPOINT_PROXIMITY_THRESHOLD}
 YOLO_MODEL_NAME = "{YOLO_MODEL_NAME}"
 YOLO_CLASS_NAME = "{YOLO_CLASS_NAME}"
 YOLO_CONFIDENCE = {YOLO_CONFIDENCE}
@@ -57,6 +61,9 @@ drone = None
 yolo_model = None
 should_stop = False
 target_found = False
+found_waypoint_idx = -1
+found_waypoint_coords = None
+lock = threading.Lock()
 
 
 def _signal_handler(sig, frame):
@@ -70,7 +77,6 @@ signal.signal(signal.SIGTERM, _signal_handler)
 
 
 def safe_land():
-    """Безопасная посадка с обработкой ошибок."""
     try:
         print("LANDING: начинаю посадку...")
         drone.control.land()
@@ -81,7 +87,6 @@ def safe_land():
 
 
 def get_aruco_position():
-    """Возвращает текущие координаты дрона в системе ArUco-карты."""
     try:
         t = drone.control.get_telemetry(frame_id="aruco_map")
         if t.x is not None and t.y is not None:
@@ -91,44 +96,100 @@ def get_aruco_position():
     return None, None, None
 
 
-def detect_bear(frame):
-    """Запускает YOLO на кадре, рисует боксы, публикует результат в /out_detection.
-    Возвращает (найден_ли_медведь, список_боксов)."""
-    annotated = frame.copy()
-    results = yolo_model(frame, verbose=False)
-    bears = []
-    for r in results:
-        for box in r.boxes:
-            cls_id = int(box.cls[0])
-            cls_name = yolo_model.names[cls_id]
-            conf = float(box.conf[0])
-            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-            if cls_name == YOLO_CLASS_NAME and conf >= YOLO_CONFIDENCE:
-                bears.append({{
-                    "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                    "confidence": conf,
-                }})
-                cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                label = f"{{cls_name}} {{conf:.2f}}"
-                cv2.putText(annotated, label, (x1, y1 - 8),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-            else:
-                cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 1)
-
-    try:
-        drone.image.publish(annotated)
-    except Exception as e:
-        print(f"  -> PUBLISH ERROR: {{e}}")
-    return len(bears) > 0, bears
+def distance_to_waypoint(x, y, wx, wy):
+    return math.sqrt((x - wx) ** 2 + (y - wy) ** 2)
 
 
-def center_over_object():
-    """Центрирует дрон над обнаруженным объектом (если объект не в центре кадра)."""
-    pass
+def check_proximity(x, y):
+    """Проверяет расстояние от позиции (x,y) до каждой точки патрулирования.
+    Возвращает (индекс_ближайшей_точки, расстояние, координаты_точки) или None."""
+    min_dist = float('inf')
+    nearest_idx = -1
+    nearest_coords = None
+    for idx, (wx, wy) in enumerate(WAYPOINTS):
+        dist = distance_to_waypoint(x, y, wx, wy)
+        print(f"    расстояние до точки {{idx + 1}} ({{wx:.2f}}, {{wy:.2f}}): {{dist:.2f}} м")
+        if dist < min_dist:
+            min_dist = dist
+            nearest_idx = idx
+            nearest_coords = (wx, wy)
+    if min_dist < WAYPOINT_PROXIMITY_THRESHOLD:
+        return nearest_idx, min_dist, nearest_coords
+    return None
+
+
+def yolo_worker():
+    """Фоновый поток: непрерывно захватывает кадры и ищет объект YOLO."""
+    global target_found, found_waypoint_idx, found_waypoint_coords
+    last_publish_time = 0
+    frame_counter = 0
+
+    while not should_stop and not target_found:
+        try:
+            frame = drone.image.take_picture(timeout=1.0)
+            if frame is None:
+                time.sleep(0.05)
+                continue
+
+            frame_counter += 1
+            annotated = frame.copy()
+            results = yolo_model(frame, verbose=False)
+
+            bears_found = False
+            for r in results:
+                for box in r.boxes:
+                    cls_id = int(box.cls[0])
+                    cls_name = yolo_model.names[cls_id]
+                    conf = float(box.conf[0])
+                    x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+
+                    if cls_name == YOLO_CLASS_NAME and conf >= YOLO_CONFIDENCE:
+                        bears_found = True
+                        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        label = f"{{cls_name}} {{conf:.2f}}"
+                        cv2.putText(annotated, label, (x1, y1 - 8),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                    else:
+                        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 1)
+
+            if bears_found:
+                print(f"\\n[YOLO worker] ОБЪЕКТ НАЙДЕН! (кадр #{{frame_counter}})")
+                x, y, z = get_aruco_position()
+                if x is not None:
+                    print(f"  позиция дрона: ({{x:.2f}}, {{y:.2f}})")
+                    proximity = check_proximity(x, y)
+                    if proximity is not None:
+                        wp_idx, wp_dist, wp_coords = proximity
+                        with lock:
+                            target_found = True
+                            found_waypoint_idx = wp_idx
+                            found_waypoint_coords = wp_coords
+                        print(f"  >>> ВАЛИДНАЯ НАХОДКА: расстояние {{wp_dist:.2f}} м < {{WAYPOINT_PROXIMITY_THRESHOLD}} м")
+                        print(f"  >>> Объект на точке с координатами ({{wp_coords[0]:.2f}}, {{wp_coords[1]:.2f}})")
+                        cv2.putText(annotated, f"FOUND at WP{{wp_idx + 1}}!",
+                                    (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    else:
+                        print(f"  >>> ИГНОРИРУЕМ: далеко от точек патрулирования (>{{WAYPOINT_PROXIMITY_THRESHOLD}} м)")
+                        cv2.putText(annotated, "IGNORED (far from WP)",
+                                    (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                else:
+                    print("  позиция не получена, пропускаем проверку")
+
+            try:
+                drone.image.publish(annotated)
+                last_publish_time = time.time()
+            except Exception as e:
+                pass
+
+        except Exception as e:
+            print(f"[YOLO worker] error: {{e}}")
+            time.sleep(0.1)
+
+    print("[YOLO worker] остановлен")
 
 
 def run():
-    global drone, yolo_model, should_stop, target_found
+    global drone, yolo_model, should_stop
 
     print("INIT: подключение sverk_interfaces...")
     drone = sverk_interfaces.init(Nodename="yolo_search_test")
@@ -136,6 +197,10 @@ def run():
     print(f"INIT: загрузка YOLO-модели ({{YOLO_MODEL_NAME}})...")
     yolo_model = YOLO(YOLO_MODEL_NAME)
     print("INIT: модель загружена")
+
+    yolo_thread = threading.Thread(target=yolo_worker, daemon=True)
+    yolo_thread.start()
+    print("INIT: YOLO-поток запущен")
 
     try:
         print(f"TAKEOFF: взлёт на {{ALTITUDE}} м...")
@@ -183,52 +248,32 @@ def run():
                 )
                 time.sleep(3)
 
-                if should_stop:
-                    break
-
-                print("  -> съёмка кадра и YOLO-поиск...")
-                frame = drone.image.take_picture(timeout=5.0)
-                if frame is None:
-                    print("  -> КАДР НЕ ПОЛУЧЕН, пропуск точки")
-                    continue
-
-                found, bears = detect_bear(frame)
-                print(f"  -> медведей найдено: {{len(bears)}}")
-
-                if found:
-                    target_found = True
-                    print(f"\\n*** ОБЪЕКТ НАЙДЕН! ***")
-                    for b in bears:
-                        print(f"    confidence: {{b['confidence']:.3f}}, "
-                              f"bbox: ({{b['x1']:.0f}}, {{b['y1']:.0f}}, {{b['x2']:.0f}}, {{b['y2']:.0f}})")
-
-                    center_over_object()
-                    time.sleep(2)
-
-                    x, y, z = get_aruco_position()
-                    if x is not None:
-                        print(f"\\nКООРДИНАТЫ ОБЪЕКТА (ArUco map):")
-                        print(f"  x = {{x:.2f}}")
-                        print(f"  y = {{y:.2f}}")
-                        print(f"  z = {{z:.2f}}")
-                    else:
-                        print("\\nНЕ УДАЛОСЬ ПОЛУЧИТЬ КООРДИНАТЫ ArUco")
-
-                    print(f"\\nFINISH: посадка в точку финиша ({{FINISH_X}}, {{FINISH_Y}})...")
-                    drone.control.navigate(
-                        x=FINISH_X, y=FINISH_Y, z=ALTITUDE,
-                        yaw=0.0, speed=0.5,
-                        frame_id="map",
-                        auto_arm=False,
-                    )
-                    time.sleep(3)
-                    safe_land()
-                    return
-
             if should_stop and not target_found:
                 print("\\nINTERRUPTED: прерывание, объект не найден")
+                print(f"FINISH: посадка в точку финиша ({{FINISH_X}}, {{FINISH_Y}})...")
+                drone.control.navigate(
+                    x=FINISH_X, y=FINISH_Y, z=ALTITUDE,
+                    yaw=0.0, speed=0.5,
+                    frame_id="map",
+                    auto_arm=False,
+                )
+                time.sleep(3)
                 safe_land()
                 return
+
+        if target_found:
+            wp_coords = found_waypoint_coords
+            print(f"\\n*** ВАЛИДНАЯ НАХОДКА ПОДТВЕРЖДЕНА ***")
+            print(f"Объект на точке с координатами ({{wp_coords[0]:.2f}}, {{wp_coords[1]:.2f}})")
+            print(f"\\nFINISH: посадка в точку финиша ({{FINISH_X}}, {{FINISH_Y}})...")
+            drone.control.navigate(
+                x=FINISH_X, y=FINISH_Y, z=ALTITUDE,
+                yaw=0.0, speed=0.5,
+                frame_id="map",
+                auto_arm=False,
+            )
+            time.sleep(3)
+            safe_land()
 
     except Exception as e:
         print(f"FATAL ERROR: {{e}}")
