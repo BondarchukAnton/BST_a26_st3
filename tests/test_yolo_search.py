@@ -13,7 +13,7 @@ import os
 import random
 import json
 
-DRONE_USER = "pi"
+DRONE_USER = "sverk"
 
 ALTITUDE = 1.7
 
