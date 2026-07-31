@@ -28,7 +28,7 @@ WAYPOINTS = [
 
 RANDOM_OFFSET_RANGE = 0.3
 
-YOLO_MODEL_PATH = "/home/pi/yolo_models/bear.pt"
+YOLO_MODEL_NAME = "yolo11n.pt"
 YOLO_CLASS_NAME = "bear"
 YOLO_CONFIDENCE = 0.5
 
@@ -41,6 +41,7 @@ import random
 import json
 
 import sverk_interfaces
+import cv2
 from ultralytics import YOLO
 
 ALTITUDE = {ALTITUDE}
@@ -48,7 +49,7 @@ FINISH_X = {FINISH_X}
 FINISH_Y = {FINISH_Y}
 WAYPOINTS = {json.dumps(WAYPOINTS)}
 RANDOM_OFFSET_RANGE = {RANDOM_OFFSET_RANGE}
-YOLO_MODEL_PATH = "{YOLO_MODEL_PATH}"
+YOLO_MODEL_NAME = "{YOLO_MODEL_NAME}"
 YOLO_CLASS_NAME = "{YOLO_CLASS_NAME}"
 YOLO_CONFIDENCE = {YOLO_CONFIDENCE}
 
@@ -91,7 +92,9 @@ def get_aruco_position():
 
 
 def detect_bear(frame):
-    """Запускает YOLO на кадре, возвращает (найден_ли_медведь, список_боксов)."""
+    """Запускает YOLO на кадре, рисует боксы, публикует результат в /out_detection.
+    Возвращает (найден_ли_медведь, список_боксов)."""
+    annotated = frame.copy()
     results = yolo_model(frame, verbose=False)
     bears = []
     for r in results:
@@ -99,12 +102,23 @@ def detect_bear(frame):
             cls_id = int(box.cls[0])
             cls_name = yolo_model.names[cls_id]
             conf = float(box.conf[0])
+            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
             if cls_name == YOLO_CLASS_NAME and conf >= YOLO_CONFIDENCE:
-                x1, y1, x2, y2 = box.xyxy[0].tolist()
                 bears.append({{
                     "x1": x1, "y1": y1, "x2": x2, "y2": y2,
                     "confidence": conf,
                 }})
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                label = f"{{cls_name}} {{conf:.2f}}"
+                cv2.putText(annotated, label, (x1, y1 - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            else:
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 1)
+
+    try:
+        drone.image.publish(annotated)
+    except Exception as e:
+        print(f"  -> PUBLISH ERROR: {{e}}")
     return len(bears) > 0, bears
 
 
@@ -119,8 +133,8 @@ def run():
     print("INIT: подключение sverk_interfaces...")
     drone = sverk_interfaces.init(Nodename="yolo_search_test")
 
-    print(f"INIT: загрузка YOLO-модели из {{YOLO_MODEL_PATH}}...")
-    yolo_model = YOLO(YOLO_MODEL_PATH)
+    print(f"INIT: загрузка YOLO-модели ({{YOLO_MODEL_NAME}})...")
+    yolo_model = YOLO(YOLO_MODEL_NAME)
     print("INIT: модель загружена")
 
     try:
