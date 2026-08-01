@@ -143,6 +143,7 @@ def run_yolo_on_frame(frame):
 
 def search_at_point(current_point):
     """Режим «ИЩЕМ»: SEARCH_DURATION сек YOLO-поиска."""
+    global target_found, should_stop, found_point
     wx, wy = current_point
     print(f"[SEARCH] поиск у точки ({{wx:.3f}}, {{wy:.3f}}), {{SEARCH_DURATION:.0f}} сек...")
     t0 = time.time()
@@ -353,12 +354,23 @@ def main():
 
         print(f"[HOST] [4/4] Запуск...")
         print("=" * 60)
+
+        # Лог-файл на хосте
+        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, f"yolo_search_{t_start.strftime('%Y%m%d_%H%M%S')}.log")
+        lf = open(log_file, "w", encoding="utf-8")
+        print(f"[HOST] лог: {log_file}")
+
         stdin, stdout, stderr = ssh.exec_command(
             f"bash -c 'source ~/sverk_ws/install/setup.bash && python3 {remote_script}'",
             get_pty=True
         )
         for line in iter(stdout.readline, ""):
             print(line, end="")
+            lf.write(line)
+        lf.close()
+
         err = stderr.read().decode()
         if err:
             print(f"\n[HOST] STDERR:\n{err.strip()}")
