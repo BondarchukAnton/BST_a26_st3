@@ -184,13 +184,13 @@ def run_yolo_on_frame(frame):
             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
 
             if YOLO_CLASS_NAME is None or cls_name == YOLO_CLASS_NAME:
-                    if conf >= YOLO_CONFIDENCE:
-                        obj_found = True
-                        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        cv2.putText(annotated, f"{{cls_name}} {{conf:.2f}}",
-                                    (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                else:
-                    cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 1)
+                if conf >= YOLO_CONFIDENCE:
+                    obj_found = True
+                    cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(annotated, f"{{cls_name}} {{conf:.2f}}",
+                                (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            else:
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 1)
 
     if obj_found:
         print(f"\\n[DETECT] ОБЪЕКТ НАЙДЕН! (кадр #{{frame_counter}})")
