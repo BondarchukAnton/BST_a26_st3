@@ -82,7 +82,8 @@ def detect_aruco(frame):
     Возвращает (center_x, center_y) в пикселях или None если не найден."""
     aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
     parameters = cv2.aruco.DetectorParameters()
-    corners, ids, _ = cv2.aruco.detectMarkers(frame, aruco_dict, parameters=parameters)
+    detector = cv2.aruco.ArucoDetector(aruco_dict, parameters)
+    corners, ids, _ = detector.detectMarkers(frame)
 
     if ids is None:
         return None
