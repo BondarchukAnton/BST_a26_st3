@@ -32,7 +32,6 @@ YOLO_MODEL_NAME = "yolo11n.pt"
 YOLO_CLASS_NAME = "bear"
 YOLO_CONFIDENCE = 0.5
 
-# VLM
 VLM_API_KEY = "sk-jkx31e2PLKxCpjOynEwyxA"
 VLM_API_BASE = "https://ai.sverk.tech/v1"
 VLM_MODEL = "gemma4-vlm"
@@ -44,7 +43,6 @@ import os
 import signal
 import random
 import json
-import threading
 import math
 import base64
 import urllib.request
@@ -112,9 +110,8 @@ drone = None
 yolo_model = None
 should_stop = False
 target_found = False
-found_waypoint_idx = -1
 found_waypoint_coords = None
-lock = threading.Lock()
+vlm_result_cache = None
 
 
 def _signal_handler(sig, frame):
@@ -152,25 +149,21 @@ def distance_to_waypoint(x, y, wx, wy):
 
 
 def check_proximity(x, y):
-    """Проверяет расстояние от позиции (x,y) до каждой точки патрулирования.
-    Возвращает (индекс_ближайшей_точки, расстояние, координаты_точки) или None."""
     min_dist = float('inf')
-    nearest_idx = -1
     nearest_coords = None
     for idx, (wx, wy) in enumerate(WAYPOINTS):
         dist = distance_to_waypoint(x, y, wx, wy)
         print(f"    расстояние до точки {{idx + 1}} ({{wx:.2f}}, {{wy:.2f}}): {{dist:.2f}} м")
         if dist < min_dist:
             min_dist = dist
-            nearest_idx = idx
             nearest_coords = (wx, wy)
     if min_dist < WAYPOINT_PROXIMITY_THRESHOLD:
-        return nearest_idx, min_dist, nearest_coords
+        return min_dist, nearest_coords
     return None
 
 
 def vlm_analyze(frame):
-    """Отправляет кадр на VLM-анализ. Возвращает распарсенный JSON-ответ или None."""
+    """Отправляет кадр на VLM. Возвращает распарсенный JSON или None."""
     try:
         _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
         b64 = base64.b64encode(buf).decode()
@@ -209,102 +202,91 @@ def vlm_analyze(frame):
         return None
 
 
-def yolo_worker():
-    """Фоновый поток: непрерывно захватывает кадры и ищет объект YOLO."""
-    global target_found, found_waypoint_idx, found_waypoint_coords
-    last_publish_time = 0
-    frame_counter = 0
+frame_counter = 0
 
-    while not should_stop and not target_found:
-        try:
-            frame = drone.image.take_picture(timeout=1.0)
-            if frame is None:
-                time.sleep(0.05)
-                continue
 
-            frame_counter += 1
-            annotated = frame.copy()
-            results = yolo_model(frame, verbose=False)
+def detect_and_check():
+    """Один цикл: кадр → YOLO → проверка близости → публикация.
+    При валидной находке также запускает VLM."""
+    global target_found, found_waypoint_coords, frame_counter, vlm_result_cache
 
-            bears_found = False
-            for r in results:
-                for box in r.boxes:
-                    cls_id = int(box.cls[0])
-                    cls_name = yolo_model.names[cls_id]
-                    conf = float(box.conf[0])
-                    x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+    frame = drone.image.take_picture(timeout=1.0)
+    if frame is None:
+        return False
 
-                    if cls_name == YOLO_CLASS_NAME and conf >= YOLO_CONFIDENCE:
-                        bears_found = True
-                        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        label = f"{{cls_name}} {{conf:.2f}}"
-                        cv2.putText(annotated, label, (x1, y1 - 8),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                    else:
-                        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 1)
+    frame_counter += 1
+    annotated = frame.copy()
+    results = yolo_model(frame, verbose=False)
 
-            if bears_found:
-                print(f"\\n[YOLO worker] ОБЪЕКТ НАЙДЕН! (кадр #{{frame_counter}})")
-                x, y, z = get_aruco_position()
-                if x is not None:
-                    print(f"  позиция дрона: ({{x:.2f}}, {{y:.2f}})")
-                    proximity = check_proximity(x, y)
-                    if proximity is not None:
-                        wp_idx, wp_dist, wp_coords = proximity
-                        with lock:
-                            target_found = True
-                            found_waypoint_idx = wp_idx
-                            found_waypoint_coords = wp_coords
-                        print(f"  >>> ВАЛИДНАЯ НАХОДКА: расстояние {{wp_dist:.2f}} м < {{WAYPOINT_PROXIMITY_THRESHOLD}} м")
-                        print(f"  >>> Объект на точке с координатами ({{wp_coords[0]:.2f}}, {{wp_coords[1]:.2f}})")
+    bears_found = False
+    for r in results:
+        for box in r.boxes:
+            cls_id = int(box.cls[0])
+            cls_name = yolo_model.names[cls_id]
+            conf = float(box.conf[0])
+            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
 
-                        print(f"\\n  [VLM] запуск анализа найденного объекта...")
-                        vlm_result = vlm_analyze(frame)
-                        if vlm_result:
-                            print(f"  [VLM] ответ:")
-                            print(f"         cheburashka : {{vlm_result.get('cheburashka')}}")
-                            print(f"         confidence  : {{vlm_result.get('confidence')}}")
-                            print(f"         direction   : {{vlm_result.get('direction')}}")
-                            print(f"         summary     : {{vlm_result.get('summary')}}")
-                        else:
-                            print(f"  [VLM] не удалось получить ответ")
-                        print()
+            if cls_name == YOLO_CLASS_NAME and conf >= YOLO_CONFIDENCE:
+                bears_found = True
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                label = f"{{cls_name}} {{conf:.2f}}"
+                cv2.putText(annotated, label, (x1, y1 - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            else:
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 1)
 
-                        cv2.putText(annotated, f"FOUND at WP{{wp_idx + 1}}! VLM OK",
-                                    (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    else:
-                        print(f"  >>> ИГНОРИРУЕМ: далеко от точек патрулирования (>{{WAYPOINT_PROXIMITY_THRESHOLD}} м)")
-                        cv2.putText(annotated, "IGNORED (far from WP)",
-                                    (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+    if bears_found:
+        print(f"\\n[DETECT] ОБЪЕКТ НАЙДЕН! (кадр #{{frame_counter}})")
+        x, y, z = get_aruco_position()
+        if x is not None:
+            print(f"  позиция дрона: ({{x:.2f}}, {{y:.2f}})")
+            proximity = check_proximity(x, y)
+            if proximity is not None:
+                wp_dist, wp_coords = proximity
+                target_found = True
+                found_waypoint_coords = wp_coords
+                print(f"  >>> ВАЛИДНАЯ НАХОДКА: {{wp_dist:.2f}} м < {{WAYPOINT_PROXIMITY_THRESHOLD}} м")
+                print(f"  >>> Объект на точке с координатами ({{wp_coords[0]:.2f}}, {{wp_coords[1]:.2f}})")
+
+                print(f"\\n  [VLM] запуск анализа найденного объекта...")
+                vlm_result_cache = vlm_analyze(frame)
+                if vlm_result_cache:
+                    print(f"  [VLM] ответ:")
+                    print(f"         cheburashka : {{vlm_result_cache.get('cheburashka')}}")
+                    print(f"         confidence  : {{vlm_result_cache.get('confidence')}}")
+                    print(f"         direction   : {{vlm_result_cache.get('direction')}}")
+                    print(f"         summary     : {{vlm_result_cache.get('summary')}}")
+                    cv2.putText(annotated, "FOUND! VLM OK",
+                                (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 else:
-                    print("  позиция не получена, пропускаем проверку")
+                    print(f"  [VLM] не удалось получить ответ")
+                    cv2.putText(annotated, "FOUND! VLM FAIL",
+                                (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                print()
+            else:
+                print(f"  >>> ИГНОРИРУЕМ: далеко от точек (>{{WAYPOINT_PROXIMITY_THRESHOLD}} м)")
+                cv2.putText(annotated, "IGNORED (far from WP)",
+                            (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        else:
+            print("  позиция не получена")
 
-            try:
-                drone.image.publish(annotated)
-                last_publish_time = time.time()
-            except Exception as e:
-                pass
+    try:
+        drone.image.publish(annotated)
+    except Exception:
+        pass
 
-        except Exception as e:
-            print(f"[YOLO worker] error: {{e}}")
-            time.sleep(0.1)
-
-    print("[YOLO worker] остановлен")
+    return target_found
 
 
 def run():
     global drone, yolo_model, should_stop
 
     print("INIT: подключение sverk_interfaces...")
-    drone = sverk_interfaces.init(Nodename="yolo_search_test")
+    drone = sverk_interfaces.init(Nodename="yolo_search_vlm")
 
     print(f"INIT: загрузка YOLO-модели ({{YOLO_MODEL_NAME}})...")
     yolo_model = YOLO(YOLO_MODEL_NAME)
     print("INIT: модель загружена")
-
-    yolo_thread = threading.Thread(target=yolo_worker, daemon=True)
-    yolo_thread.start()
-    print("INIT: YOLO-поток запущен")
 
     try:
         print(f"TAKEOFF: взлёт на {{ALTITUDE}} м...")
@@ -350,7 +332,12 @@ def run():
                     frame_id="map",
                     auto_arm=False,
                 )
-                time.sleep(3)
+
+                t0 = time.time()
+                while time.time() - t0 < 3.0 and not target_found and not should_stop:
+                    if detect_and_check():
+                        break
+                    time.sleep(0.15)
 
             if should_stop and not target_found:
                 print("\\nINTERRUPTED: прерывание, объект не найден")
@@ -367,8 +354,15 @@ def run():
 
         if target_found:
             wp_coords = found_waypoint_coords
-            print(f"\\n*** ВАЛИДНАЯ НАХОДКА ПОДТВЕРЖДЕНА ***")
+            print(f"\\n{'=' * 50}")
+            print(f"*** ВАЛИДНАЯ НАХОДКА ПОДТВЕРЖДЕНА ***")
             print(f"Объект на точке с координатами ({{wp_coords[0]:.2f}}, {{wp_coords[1]:.2f}})")
+            if vlm_result_cache:
+                print(f"VLM: cheburashka={{vlm_result_cache.get('cheburashka')}} "
+                      f"confidence={{vlm_result_cache.get('confidence')}} "
+                      f"direction={{vlm_result_cache.get('direction')}}")
+                print(f"VLM summary: {{vlm_result_cache.get('summary')}}")
+            print(f"{{'=' * 50}}")
             print(f"\\nFINISH: посадка в точку финиша ({{FINISH_X}}, {{FINISH_Y}})...")
             drone.control.navigate(
                 x=FINISH_X, y=FINISH_Y, z=ALTITUDE,
@@ -403,7 +397,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def main():
     if len(sys.argv) < 3:
-        print("Использование: python3 test_yolo_search.py <drone_ip> <password>")
+        print("Использование: python3 test_yolo_search_vlm.py <drone_ip> <password>")
         sys.exit(1)
 
     drone_ip = sys.argv[1]
@@ -419,7 +413,7 @@ def main():
         print(f"[{drone_ip}] Подключено. Загрузка полётной программы...")
 
         sftp = ssh.open_sftp()
-        remote_script = "/tmp/_yolo_search_test.py"
+        remote_script = "/tmp/_yolo_search_vlm.py"
         with sftp.open(remote_script, "w") as f:
             f.write(ONBOARD_SCRIPT)
         sftp.close()
