@@ -419,10 +419,13 @@ def main():
         sftp.close()
 
         print(f"[{drone_ip}] Запуск полётной программы...")
-        stdin, stdout, stderr = ssh.exec_command(f"source ~/sverk_ws/install/setup.bash && python3 {remote_script}")
-        out = stdout.read().decode()
+        stdin, stdout, stderr = ssh.exec_command(
+            f"bash -c 'source ~/sverk_ws/install/setup.bash && python3 {remote_script}'",
+            get_pty=True
+        )
+        for line in iter(stdout.readline, ""):
+            print(line, end="")
         err = stderr.read().decode()
-        print(out.strip())
         if err:
             print(f"STDERR:\n{err.strip()}", file=sys.stderr)
 
