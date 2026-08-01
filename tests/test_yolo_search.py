@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
 Тест: взлёт дрона, циклический облёт 2 точек с YOLO-поиском.
-Режимы: ЛЕТИМ (перемещение между точками) → ИЩЕМ (8 сек YOLO-поток у точки).
-При нахождении объекта рядом с точкой — вывод координат, посадка на финиш.
-
+Режимы: ЛЕТИМ → ИЩЕМ (8 сек YOLO у точки). Нашли — выводим точку.
 Использование: python3 test_yolo_search.py <drone_ip> <password>
 """
 
@@ -19,60 +17,34 @@ import json
 
 DRONE_USER = "sverk"
 
-ALTITUDE = 2.0                  # рабочая высота (м)
-SPEED = 0.5                     # крейсерская скорость (м/с)
-SEARCH_DURATION = 8.0           # длительность режима «ИЩЕМ» у точки (сек)
+ALTITUDE = 2.0
+SPEED = 0.5
+SEARCH_DURATION = 8.0
 
-FINISH_X = 0.0                  # точка финиша X
-FINISH_Y = 0.0                  # точка финиша Y
+FINISH_X = 0.0
+FINISH_Y = 0.0
 
 WAYPOINTS = [
     (0.4, 4.425),
     (1.205, 1.205),
 ]
 
-# Случайное смещение (м), добавляемое к координатам точки на повторных проходах.
-# Чем больше — тем шире зона поиска, но выше риск улететь за пределы полигона.
 RANDOM_OFFSET_RANGE = 0.3
-
-# Порог близости к точке патрулирования (м). Если YOLO нашёл объект,
-# а дрон находится дальше этого расстояния от ОБЕИХ точек — находка игнорируется.
-# Нужно чтобы не реагировать на объекты за пределами зоны поиска.
-WAYPOINT_PROXIMITY_THRESHOLD = 0.5
 
 # === Модель ===
 
-# Путь к файлу модели НА ЭТОМ КОМПЬЮТЕРЕ (.pt / .onnx / .engine).
-# Если задан — файл будет загружен на дрон по SFTP и использован.
-# Поддерживаются все форматы ultralytics: .pt, .onnx, .engine, .tflite и др.
-#   Примеры:
-#     LOCAL_MODEL_PATH = "models/best.pt"         # PyTorch
-#     LOCAL_MODEL_PATH = "models/best_int8.onnx"  # ONNX (быстрее на CPU)
-#     LOCAL_MODEL_PATH = "models/best_fp16.engine" # TensorRT (макс. скорость на GPU)
 LOCAL_MODEL_PATH = None
-
-# Папка на дроне, куда кладётся модель
 DRONE_MODEL_DIR = "/home/sverk/yolo_models"
-
-# Имя файла модели на дроне (старая удаляется при загрузке новой)
 DRONE_MODEL_NAME = "yolo_model.pt"
 
-# Имя модели для АВТО-СКАЧИВАНИЯ через ultralytics.
-# Используется ТОЛЬКО если LOCAL_MODEL_PATH = None И модели нет на дроне.
-#   yolo11n.pt — nano (2.6M, самая быстрая)
-#   yolo11s.pt — small (9.4M)
-#   yolo11m.pt — medium (20M)
 YOLO_MODEL_NAME = "yolo11n.pt"
 
-# Класс для поиска. Возможные значения:
-#   None     — искать ВСЕ классы (для стандартной модели)
+# Класс для поиска:
+#   None     — искать ВСЕ классы (любой объект с уверенностью > порога)
 #   "bear"   — медведь (COCO class 21)
 #   "teddy bear" — плюшевый медведь (COCO class 77)
-#   Если модель дообучена на 1 класс — укажи имя этого класса из твоего dataset.yaml
-YOLO_CLASS_NAME = "bear"
+YOLO_CLASS_NAME = None
 
-# Минимальная уверенность (confidence) для засчитывания детекции.
-# 0.5 = 50%. Ниже — больше ложных срабатываний, выше — можно пропустить объект.
 YOLO_CONFIDENCE = 0.5
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -99,7 +71,6 @@ FINISH_X = {FINISH_X}
 FINISH_Y = {FINISH_Y}
 WAYPOINTS = {json.dumps(WAYPOINTS)}
 RANDOM_OFFSET_RANGE = {RANDOM_OFFSET_RANGE}
-WAYPOINT_PROXIMITY_THRESHOLD = {WAYPOINT_PROXIMITY_THRESHOLD}
 DRONE_MODEL_DIR = "{DRONE_MODEL_DIR}"
 DRONE_MODEL_NAME = "{DRONE_MODEL_NAME}"
 YOLO_CLASS_NAME = {repr(YOLO_CLASS_NAME)}
@@ -110,7 +81,7 @@ drone = None
 yolo_model = None
 should_stop = False
 target_found = False
-found_waypoint_coords = None
+found_point = None
 frame_counter = 0
 
 
@@ -134,48 +105,14 @@ def safe_land():
         print(f"[LAND] ОШИБКА: {{e}}")
 
 
-def get_aruco_position():
-    try:
-        t = drone.control.get_telemetry(frame_id="aruco_map")
-        if t.x is not None and t.y is not None:
-            return t.x, t.y
-    except Exception as e:
-        print(f"[ARUCO] ошибка телеметрии: {{e}}")
-    return None, None
-
-
-def is_aruco_visible():
-    x, y = get_aruco_position()
-    return x is not None and not (math.isnan(x) or math.isnan(y))
-
-
-def distance_to_waypoint(x, y, wx, wy):
-    return math.sqrt((x - wx) ** 2 + (y - wy) ** 2)
-
-
-def check_proximity(x, y):
-    min_dist = float('inf')
-    nearest_coords = None
-    for idx, (wx, wy) in enumerate(WAYPOINTS):
-        dist = distance_to_waypoint(x, y, wx, wy)
-        print(f"    расстояние до точки {{idx + 1}} ({{wx:.3f}}, {{wy:.3f}}): {{dist:.2f}} м")
-        if dist < min_dist:
-            min_dist = dist
-            nearest_coords = (wx, wy)
-    if min_dist < WAYPOINT_PROXIMITY_THRESHOLD:
-        return min_dist, nearest_coords
-    return None
-
-
 def run_yolo_on_frame(frame):
-    """Прогоняет YOLO на кадре, рисует боксы, публикует.
-    Возвращает True если найден целевой объект."""
-    global target_found, found_waypoint_coords, frame_counter
+    """Прогоняет YOLO, рисует боксы, публикует. При обнаружении — True."""
+    global target_found, found_point, frame_counter
     frame_counter += 1
     annotated = frame.copy()
     results = yolo_model(frame, verbose=False)
 
-    obj_found = False
+    detected_anything = False
     for r in results:
         for box in r.boxes:
             cls_id = int(box.cls[0])
@@ -183,81 +120,72 @@ def run_yolo_on_frame(frame):
             conf = float(box.conf[0])
             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
 
-            if YOLO_CLASS_NAME is None or cls_name == YOLO_CLASS_NAME:
-                if conf >= YOLO_CONFIDENCE:
-                    obj_found = True
-                    cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(annotated, f"{{cls_name}} {{conf:.2f}}",
-                                (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            # Фильтр по классу (None = любой класс)
+            if YOLO_CLASS_NAME is not None and cls_name != YOLO_CLASS_NAME:
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 1)
+                continue
+
+            if conf >= YOLO_CONFIDENCE:
+                detected_anything = True
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(annotated, f"{{cls_name}} {{conf:.2f}}",
+                            (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
             else:
                 cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 1)
-
-    if obj_found:
-        print(f"\\n[DETECT] ОБЪЕКТ НАЙДЕН! (кадр #{{frame_counter}})")
-        x, y = get_aruco_position()
-        if x is not None:
-            print(f"  позиция дрона: ({{x:.3f}}, {{y:.3f}})")
-            proximity = check_proximity(x, y)
-            if proximity is not None:
-                wp_dist, wp_coords = proximity
-                target_found = True
-                found_waypoint_coords = wp_coords
-                print(f"  >>> ВАЛИДНАЯ НАХОДКА: {{wp_dist:.2f}} м < {{WAYPOINT_PROXIMITY_THRESHOLD}} м")
-                print(f"  >>> Объект на точке с координатами ({{wp_coords[0]:.3f}}, {{wp_coords[1]:.3f}})")
-                cv2.putText(annotated, "FOUND!", (10, 20),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            else:
-                print(f"  >>> ИГНОРИРУЕМ: далеко от точек")
-                cv2.putText(annotated, "IGNORED", (10, 20),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
     try:
         drone.image.publish(annotated)
     except Exception:
         pass
-    return target_found
+
+    return detected_anything
 
 
-def search_at_point():
-    """Режим «ИЩЕМ»: SEARCH_DURATION секунд YOLO-поиска."""
-    print(f"[SEARCH] начало поиска, длительность {{SEARCH_DURATION:.0f}} сек...")
+def search_at_point(current_point):
+    """Режим «ИЩЕМ»: SEARCH_DURATION сек YOLO-поиска."""
+    wx, wy = current_point
+    print(f"[SEARCH] поиск у точки ({{wx:.3f}}, {{wy:.3f}}), {{SEARCH_DURATION:.0f}} сек...")
     t0 = time.time()
-    frames_processed = 0
+    frames_ok = 0
     last_report = 0
     while time.time() - t0 < SEARCH_DURATION and not target_found and not should_stop:
-        elapsed = time.time() - t0
-        if elapsed - last_report >= 2.0:
-            print(f"[SEARCH] ... {{elapsed:.0f}}/{{SEARCH_DURATION:.0f}} сек, кадров: {{frames_processed}}")
-            last_report = elapsed
-
         frame = drone.image.take_picture(timeout=1.0)
         if frame is not None:
-            frames_processed += 1
+            frames_ok += 1
             if run_yolo_on_frame(frame):
-                print(f"[SEARCH] цель найдена на {{elapsed:.1f}} сек, кадр #{{frame_counter}}")
+                target_found = True
+                found_point = current_point
+                elapsed = time.time() - t0
+                print(f"\\n[DETECT] *** ОБЪЕКТ НАЙДЕН ***")
+                print(f"[DETECT] точка: ({{wx:.3f}}, {{wy:.3f}})")
+                print(f"[DETECT] время поиска: {{elapsed:.1f}} сек, кадров: {{frames_ok}}")
                 return
         time.sleep(0.1)
+
+        elapsed = time.time() - t0
+        if elapsed - last_report >= 2.0:
+            print(f"[SEARCH] ... {{elapsed:.0f}} сек, кадров: {{frames_ok}}, всего: {{frame_counter}}")
+            last_report = elapsed
+
     if not target_found:
-        print(f"[SEARCH] завершён, кадров обработано: {{frames_processed}}, цель не найдена")
+        print(f"[SEARCH] завершён, кадров: {{frames_ok}}, цель не найдена")
 
 
 def load_model():
-    """Загружает модель. Если была загружена новая — переносит её."""
     model_path = os.path.join(DRONE_MODEL_DIR, DRONE_MODEL_NAME)
     print(f"[MODEL] путь: {{model_path}}")
     if MODEL_UPLOADED and os.path.exists("/tmp/yolo_upload.pt"):
-        print("[MODEL] обнаружена загруженная модель, установка...")
+        print("[MODEL] установка загруженной модели...")
         os.makedirs(DRONE_MODEL_DIR, exist_ok=True)
         if os.path.exists(model_path):
             os.remove(model_path)
         os.rename("/tmp/yolo_upload.pt", model_path)
-        print(f"[MODEL] модель установлена в {{model_path}}")
 
     if os.path.exists(model_path):
         print(f"[MODEL] загрузка из {{model_path}}...")
         m = YOLO(model_path)
     else:
-        print(f"[MODEL] {{YOLO_MODEL_NAME}} не найден локально, авто-скачивание...")
+        print(f"[MODEL] авто-скачивание {{YOLO_MODEL_NAME}}...")
         m = YOLO("{YOLO_MODEL_NAME}")
     print(f"[MODEL] загружена, классов: {{len(m.names)}}")
     return m
@@ -270,16 +198,15 @@ def run():
     print("[INIT] подключение sverk_interfaces...")
     t0 = time.time()
     drone = sverk_interfaces.init(Nodename="yolo_search_test")
-    print(f"[INIT] sverk_interfaces подключён ({{time.time() - t0:.1f}} сек)")
+    print(f"[INIT] готово ({{time.time() - t0:.1f}} сек)")
 
     print("[INIT] загрузка YOLO...")
     t0 = time.time()
     yolo_model = load_model()
-    print(f"[INIT] YOLO готов ({{time.time() - t0:.1f}} сек)")
+    print(f"[INIT] готово ({{time.time() - t0:.1f}} сек)")
 
     try:
-        print("=" * 50)
-        print(f"[TAKEOFF] взлёт на {{ALTITUDE}} м (frame=body, auto_arm=True)...")
+        print(f"[TAKEOFF] взлёт на {{ALTITUDE}} м...")
         t0 = time.time()
         drone.control.navigate(
             x=0.0, y=0.0, z=ALTITUDE,
@@ -290,19 +217,7 @@ def run():
         time.sleep(5)
         print("[TAKEOFF] взлёт выполнен")
 
-        print("[ARUCO] ожидание ArUco-карты...")
-        t0 = time.time()
-        for i in range(10):
-            if is_aruco_visible():
-                print(f"[ARUCO] обнаружен через {{time.time() - t0:.1f}} сек")
-                break
-            print(f"[ARUCO] попытка {{i + 1}}/10 — не видно")
-            time.sleep(0.5)
-        else:
-            print("[ARUCO] ПРЕДУПРЕЖДЕНИЕ: ArUco не обнаружен за 5 сек, продолжаем")
-
         if should_stop:
-            print("[ABORT] прерывание после взлёта")
             safe_land()
             return
 
@@ -310,7 +225,7 @@ def run():
         while not target_found and not should_stop:
             cycle += 1
             print(f"\\n{{'=' * 50}}")
-            print(f"[CYCLE {{cycle}}] начало облёта")
+            print(f"[CYCLE {{cycle}}] облёт точек")
             random.seed(time.time() + cycle)
 
             for idx, (wx, wy) in enumerate(WAYPOINTS):
@@ -334,22 +249,17 @@ def run():
                     yaw=0.0, speed=SPEED,
                     frame_id="aruco_map", auto_arm=False,
                 )
-                print(f"[FLY] команда отправлена ({{time.time() - t0:.1f}} сек), ожидание 4 сек...")
+                print(f"[FLY] отправлено ({{time.time() - t0:.1f}} сек), ожидание 4 сек...")
                 time.sleep(4)
 
                 if should_stop:
                     break
 
-                t = drone.control.get_telemetry(frame_id="aruco_map")
-                dist = math.sqrt((t.x - tx)**2 + (t.y - ty)**2)
-                print(f"[FLY] прибыли: позиция ({{t.x:.3f}}, {{t.y:.3f}}), "
-                      f"отклонение от цели: {{dist:.2f}} м")
-
-                search_at_point()
+                search_at_point((tx, ty))
 
             if should_stop and not target_found:
-                print("\\n[ABORT] прерывание, цель не найдена")
-                print(f"[FINISH] полёт к финишу ({{FINISH_X}}, {{FINISH_Y}})...")
+                print("\\n[ABORT] прерывание")
+                print(f"[FINISH] полёт к ({{FINISH_X}}, {{FINISH_Y}})...")
                 drone.control.navigate(
                     x=FINISH_X, y=FINISH_Y, z=ALTITUDE,
                     yaw=0.0, speed=SPEED,
@@ -360,12 +270,11 @@ def run():
                 return
 
         if target_found:
-            wp_coords = found_waypoint_coords
             print(f"\\n{{'=' * 50}}")
-            print(f"[RESULT] *** ВАЛИДНАЯ НАХОДКА ***")
-            print(f"[RESULT] объект на точке: ({{wp_coords[0]:.3f}}, {{wp_coords[1]:.3f}})")
-            print(f"[RESULT] всего кадров обработано: {{frame_counter}}")
-            print(f"[FINISH] полёт к финишу ({{FINISH_X}}, {{FINISH_Y}})...")
+            print(f"[RESULT] *** ОБЪЕКТ НАЙДЕН ***")
+            print(f"[RESULT] точка: ({{found_point[0]:.3f}}, {{found_point[1]:.3f}})")
+            print(f"[RESULT] кадров обработано: {{frame_counter}}")
+            print(f"[FINISH] полёт к ({{FINISH_X}}, {{FINISH_Y}})...")
             drone.control.navigate(
                 x=FINISH_X, y=FINISH_Y, z=ALTITUDE,
                 yaw=0.0, speed=SPEED,
@@ -409,11 +318,9 @@ def main():
     drone_ip = sys.argv[1]
     password = sys.argv[2]
     t_start = datetime.datetime.now()
-    print(f"[HOST {{t_start.strftime('%H:%M:%S')}}] === ТЕСТ YOLO-ПОИСКА ===")
+    print(f"[HOST {t_start.strftime('%H:%M:%S')}] === ТЕСТ YOLO-ПОИСКА ===")
     print(f"[HOST] дрон: {drone_ip}  высота: {ALTITUDE} м  скорость: {SPEED} м/с")
-    print(f"[HOST] точек: {len(WAYPOINTS)}  поиск у точки: {SEARCH_DURATION} сек  "
-          f"порог близости: {WAYPOINT_PROXIMITY_THRESHOLD} м")
-    print(f"[HOST] модель: {YOLO_MODEL_NAME}  класс: {YOLO_CLASS_NAME}  confidence: {YOLO_CONFIDENCE}")
+    print(f"[HOST] точек: {len(WAYPOINTS)}  поиск у точки: {SEARCH_DURATION} сек")
 
     print(f"\n[HOST] [1/4] SSH-подключение к {drone_ip}...")
     ssh = paramiko.SSHClient()
@@ -422,9 +329,8 @@ def main():
     try:
         ssh.connect(hostname=drone_ip, username=DRONE_USER,
                     password=password, timeout=30)
-        print(f"[HOST] [1/4] SSH-подключение: OK")
+        print(f"[HOST] [1/4] SSH: OK")
 
-        # Загрузка модели если указан локальный путь
         if LOCAL_MODEL_PATH and os.path.exists(LOCAL_MODEL_PATH):
             size_mb = os.path.getsize(LOCAL_MODEL_PATH) / 1024 / 1024
             print(f"[HOST] [2/4] Загрузка модели {LOCAL_MODEL_PATH} ({size_mb:.1f} МБ) → дрон...")
@@ -437,8 +343,7 @@ def main():
         else:
             print(f"[HOST] [2/4] ПРОПУСК: используется модель на дроне")
 
-        # Загрузка полётной программы
-        print(f"[HOST] [3/4] Загрузка полётной программы ({len(ONBOARD_SCRIPT)} байт)...")
+        print(f"[HOST] [3/4] Загрузка программы ({len(ONBOARD_SCRIPT)} байт)...")
         sftp = ssh.open_sftp()
         remote_script = "/tmp/_yolo_search.py"
         with sftp.open(remote_script, "w") as f:
@@ -446,7 +351,7 @@ def main():
         sftp.close()
         print(f"[HOST] [3/4] Программа загружена: OK")
 
-        print(f"[HOST] [4/4] Запуск полётной программы...")
+        print(f"[HOST] [4/4] Запуск...")
         print("=" * 60)
         stdin, stdout, stderr = ssh.exec_command(
             f"bash -c 'source ~/sverk_ws/install/setup.bash && python3 {remote_script}'",
@@ -459,7 +364,7 @@ def main():
             print(f"\n[HOST] STDERR:\n{err.strip()}")
         print("=" * 60)
 
-        print(f"[HOST] очистка временных файлов...")
+        print(f"[HOST] очистка...")
         sftp = ssh.open_sftp()
         try:
             sftp.remove(remote_script)
