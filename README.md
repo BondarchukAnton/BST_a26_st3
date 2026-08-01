@@ -62,11 +62,6 @@ venv\Scripts\activate.bat
 
 Признак успеха — в начале строки терминала появится `(venv)`.
 
-### Установка Python-зависимостей:
-```bash
-pip install -r requirements.txt
-```
-
 ### Деактивация (когда закончили):
 ```bash
 deactivate

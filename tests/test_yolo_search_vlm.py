@@ -1,0 +1,449 @@
+#!/usr/bin/env python3
+"""
+Тест: взлёт, YOLO-поиск + VLM-анализ найденного объекта.
+При нахождении объекта рядом с точкой — снимок подаётся на VLM,
+выводятся координаты точки и результат VLM, затем посадка на финиш.
+
+Использование: python3 test_yolo_search_vlm.py <drone_ip> <password>
+"""
+
+import paramiko
+import sys
+import os
+import random
+import json
+
+DRONE_USER = "sverk"
+
+ALTITUDE = 1.7
+
+FINISH_X = 0.0
+FINISH_Y = 0.0
+
+WAYPOINTS = [
+    (2.0, 0.0),
+    (0.0, 2.0),
+]
+
+RANDOM_OFFSET_RANGE = 0.3
+WAYPOINT_PROXIMITY_THRESHOLD = 0.5
+
+YOLO_MODEL_NAME = "yolo11n.pt"
+YOLO_CLASS_NAME = "bear"
+YOLO_CONFIDENCE = 0.5
+
+# VLM
+VLM_API_KEY = "sk-jkx31e2PLKxCpjOynEwyxA"
+VLM_API_BASE = "https://ai.sverk.tech/v1"
+VLM_MODEL = "gemma4-vlm"
+
+ONBOARD_SCRIPT = f'''
+import time
+import sys
+import os
+import signal
+import random
+import json
+import threading
+import math
+import base64
+import urllib.request
+
+import sverk_interfaces
+import cv2
+from ultralytics import YOLO
+
+ALTITUDE = {ALTITUDE}
+FINISH_X = {FINISH_X}
+FINISH_Y = {FINISH_Y}
+WAYPOINTS = {json.dumps(WAYPOINTS)}
+RANDOM_OFFSET_RANGE = {RANDOM_OFFSET_RANGE}
+WAYPOINT_PROXIMITY_THRESHOLD = {WAYPOINT_PROXIMITY_THRESHOLD}
+YOLO_MODEL_NAME = "{YOLO_MODEL_NAME}"
+YOLO_CLASS_NAME = "{YOLO_CLASS_NAME}"
+YOLO_CONFIDENCE = {YOLO_CONFIDENCE}
+VLM_API_KEY = "{VLM_API_KEY}"
+VLM_API_BASE = "{VLM_API_BASE}"
+VLM_MODEL = "{VLM_MODEL}"
+
+VLM_PROMPT = \"\"\"Ты — специализированный детектор целевого объекта (плюшевая игрушка Чебурашка) на бортовом компьютере дрона.
+Перед тобой кадр с камеры дрона, направленной строго вниз на игровое поле, разделенное на квадратные клетки.
+Дрон висит над центром одной клетки (Центральная клетка под дроном = область в центре кадра).
+По краям кадра могут быть частично видны соседние клетки.
+Твоя задача — проанализировать аэроснимок игрового поля сверху и найти целевые объекты — мягкие/плюшевые игрушки Чебурашки.
+
+
+### 1. ВИЗУАЛЬНЫЕ ПРИЗНАКИ И ИСКЛЮЧЕНИЯ:
+- ЦЕЛЕВОЙ ОБЪЕКТ "ЧЕБУРАШКА": Плюшевая (мягкая) игрушка персонажа Чебурашка в оттенках коричневого цвета (от темно-коричневого до шоколадного).
+  Ключевые визуальные признаки при взгляде сверху:
+  * Пропорционально огромные округлые уши по бокам головы.
+  * Плюшевая/ворсистая или тканевая объемная фактура тела.
+  * Светлая (бежевая, жёлто-коричневая, охра) зона мордочки и/или грудки, контрастирующая с основным коричневым телом.
+  * Компактные пропорции туловища и головы.
+  Активно используй показатель уверенности (confidence): если объект виден частично, имеет небольшой размер или нестандартный угол, сигнализируй об этом с соответствующей степенью уверенности (например, 0.55–0.65).
+
+- ИСКЛЮЧЕНИЯ (НЕ считай Чебурашкой!):
+  * Плоские коричневые элементы карты, разметка, картонки или коричневые участки покрытия без объема и ворсистости.
+  * Коричневые деревянные или пластиковые кубики конструктора и элементы зданий с чёткими геометрическими гранями.
+  * Тёмно-коричневые тени и грязь.
+
+### 2. ПРАВИЛА ЛОКАЛИЗАЦИИ:
+Определи направление клетки с объектом относительно центра кадра:
+- "center" — Чебурашка находится в центральной клетке прямо под дроном.
+- "left", "right", "up", "down", "up-left", "up-right", "down-left", "down-right" — Чебурашка находится в соответствующей соседней клетке.
+- "none" — объектов Чебурашки на кадре не обнаружено.
+
+### 3. ФОРМАТ ОТВЕТА:
+Верни ответ СТРОГО в формате JSON без Markdown-разметки, вводных слов и пояснений вне JSON:
+{{
+  "cheburashka": true,
+  "confidence": 0.95,
+  "direction": "center",
+  "summary": "краткое резюме об объектах в кадре"
+}}
+
+Описание полей:
+- cheburashka (boolean): true, если найден хотя бы один объект Чебурашки, иначе false.
+- confidence (float): степень уверенности в детекции от 0.0 до 1.0.
+- direction (string): строго одно из значений: "center", "left", "right", "up", "down", "up-left", "up-right", "down-left", "down-right" или "none" (если cheburashka=false).
+- summary (string): краткое итоговое текстовое описание.\"\"\"
+
+drone = None
+yolo_model = None
+should_stop = False
+target_found = False
+found_waypoint_idx = -1
+found_waypoint_coords = None
+lock = threading.Lock()
+
+
+def _signal_handler(sig, frame):
+    global should_stop
+    should_stop = True
+    print("SIGNAL: получен сигнал прерывания, готовлюсь к посадке")
+
+
+signal.signal(signal.SIGINT, _signal_handler)
+signal.signal(signal.SIGTERM, _signal_handler)
+
+
+def safe_land():
+    try:
+        print("LANDING: начинаю посадку...")
+        drone.control.land()
+        time.sleep(3)
+        print("LANDING: посадка выполнена")
+    except Exception as e:
+        print(f"LANDING ERROR: {{e}}")
+
+
+def get_aruco_position():
+    try:
+        t = drone.control.get_telemetry(frame_id="aruco_map")
+        if t.x is not None and t.y is not None:
+            return t.x, t.y, t.z
+    except Exception as e:
+        print(f"TELEMETRY ERROR: {{e}}")
+    return None, None, None
+
+
+def distance_to_waypoint(x, y, wx, wy):
+    return math.sqrt((x - wx) ** 2 + (y - wy) ** 2)
+
+
+def check_proximity(x, y):
+    """Проверяет расстояние от позиции (x,y) до каждой точки патрулирования.
+    Возвращает (индекс_ближайшей_точки, расстояние, координаты_точки) или None."""
+    min_dist = float('inf')
+    nearest_idx = -1
+    nearest_coords = None
+    for idx, (wx, wy) in enumerate(WAYPOINTS):
+        dist = distance_to_waypoint(x, y, wx, wy)
+        print(f"    расстояние до точки {{idx + 1}} ({{wx:.2f}}, {{wy:.2f}}): {{dist:.2f}} м")
+        if dist < min_dist:
+            min_dist = dist
+            nearest_idx = idx
+            nearest_coords = (wx, wy)
+    if min_dist < WAYPOINT_PROXIMITY_THRESHOLD:
+        return nearest_idx, min_dist, nearest_coords
+    return None
+
+
+def vlm_analyze(frame):
+    """Отправляет кадр на VLM-анализ. Возвращает распарсенный JSON-ответ или None."""
+    try:
+        _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        b64 = base64.b64encode(buf).decode()
+
+        payload = {{
+            "model": VLM_MODEL,
+            "max_tokens": 200,
+            "messages": [
+                {{"role": "system", "content": VLM_PROMPT}},
+                {{"role": "user", "content": [
+                    {{"type": "text", "text": "Проанализируй этот кадр и найди Чебурашку."}},
+                    {{"type": "image_url", "image_url": {{"url": f"data:image/jpeg;base64,{{b64}}"}}}}
+                ]}}
+            ]
+        }}
+
+        req = urllib.request.Request(
+            f"{{VLM_API_BASE}}/chat/completions",
+            data=json.dumps(payload).encode(),
+            headers={{"Content-Type": "application/json", "Authorization": f"Bearer {{VLM_API_KEY}}"}},
+            method="POST"
+        )
+
+        print("  [VLM] отправка кадра на анализ...")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+            content = data["choices"][0]["message"].get("content", "")
+
+        raw = content.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\\n", 1)[1].rsplit("```", 1)[0].strip()
+        return json.loads(raw)
+
+    except Exception as e:
+        print(f"  [VLM] ошибка: {{e}}")
+        return None
+
+
+def yolo_worker():
+    """Фоновый поток: непрерывно захватывает кадры и ищет объект YOLO."""
+    global target_found, found_waypoint_idx, found_waypoint_coords
+    last_publish_time = 0
+    frame_counter = 0
+
+    while not should_stop and not target_found:
+        try:
+            frame = drone.image.take_picture(timeout=1.0)
+            if frame is None:
+                time.sleep(0.05)
+                continue
+
+            frame_counter += 1
+            annotated = frame.copy()
+            results = yolo_model(frame, verbose=False)
+
+            bears_found = False
+            for r in results:
+                for box in r.boxes:
+                    cls_id = int(box.cls[0])
+                    cls_name = yolo_model.names[cls_id]
+                    conf = float(box.conf[0])
+                    x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+
+                    if cls_name == YOLO_CLASS_NAME and conf >= YOLO_CONFIDENCE:
+                        bears_found = True
+                        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        label = f"{{cls_name}} {{conf:.2f}}"
+                        cv2.putText(annotated, label, (x1, y1 - 8),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                    else:
+                        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 1)
+
+            if bears_found:
+                print(f"\\n[YOLO worker] ОБЪЕКТ НАЙДЕН! (кадр #{{frame_counter}})")
+                x, y, z = get_aruco_position()
+                if x is not None:
+                    print(f"  позиция дрона: ({{x:.2f}}, {{y:.2f}})")
+                    proximity = check_proximity(x, y)
+                    if proximity is not None:
+                        wp_idx, wp_dist, wp_coords = proximity
+                        with lock:
+                            target_found = True
+                            found_waypoint_idx = wp_idx
+                            found_waypoint_coords = wp_coords
+                        print(f"  >>> ВАЛИДНАЯ НАХОДКА: расстояние {{wp_dist:.2f}} м < {{WAYPOINT_PROXIMITY_THRESHOLD}} м")
+                        print(f"  >>> Объект на точке с координатами ({{wp_coords[0]:.2f}}, {{wp_coords[1]:.2f}})")
+
+                        print(f"\\n  [VLM] запуск анализа найденного объекта...")
+                        vlm_result = vlm_analyze(frame)
+                        if vlm_result:
+                            print(f"  [VLM] ответ:")
+                            print(f"         cheburashka : {{vlm_result.get('cheburashka')}}")
+                            print(f"         confidence  : {{vlm_result.get('confidence')}}")
+                            print(f"         direction   : {{vlm_result.get('direction')}}")
+                            print(f"         summary     : {{vlm_result.get('summary')}}")
+                        else:
+                            print(f"  [VLM] не удалось получить ответ")
+                        print()
+
+                        cv2.putText(annotated, f"FOUND at WP{{wp_idx + 1}}! VLM OK",
+                                    (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    else:
+                        print(f"  >>> ИГНОРИРУЕМ: далеко от точек патрулирования (>{{WAYPOINT_PROXIMITY_THRESHOLD}} м)")
+                        cv2.putText(annotated, "IGNORED (far from WP)",
+                                    (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                else:
+                    print("  позиция не получена, пропускаем проверку")
+
+            try:
+                drone.image.publish(annotated)
+                last_publish_time = time.time()
+            except Exception as e:
+                pass
+
+        except Exception as e:
+            print(f"[YOLO worker] error: {{e}}")
+            time.sleep(0.1)
+
+    print("[YOLO worker] остановлен")
+
+
+def run():
+    global drone, yolo_model, should_stop
+
+    print("INIT: подключение sverk_interfaces...")
+    drone = sverk_interfaces.init(Nodename="yolo_search_test")
+
+    print(f"INIT: загрузка YOLO-модели ({{YOLO_MODEL_NAME}})...")
+    yolo_model = YOLO(YOLO_MODEL_NAME)
+    print("INIT: модель загружена")
+
+    yolo_thread = threading.Thread(target=yolo_worker, daemon=True)
+    yolo_thread.start()
+    print("INIT: YOLO-поток запущен")
+
+    try:
+        print(f"TAKEOFF: взлёт на {{ALTITUDE}} м...")
+        drone.control.navigate(
+            x=0.0, y=0.0, z=ALTITUDE,
+            yaw=0.0, speed=0.5,
+            frame_id="body",
+            auto_arm=True,
+        )
+        time.sleep(3)
+        print("TAKEOFF: взлёт выполнен")
+
+        if should_stop:
+            safe_land()
+            return
+
+        cycle = 0
+        while not target_found and not should_stop:
+            cycle += 1
+            print(f"\\nCYCLE {{cycle}}: облёт точек")
+            random.seed(time.time() + cycle)
+
+            for idx, (wx, wy) in enumerate(WAYPOINTS):
+                if should_stop or target_found:
+                    break
+
+                offset_x = 0.0
+                offset_y = 0.0
+                if cycle > 1:
+                    offset_x = random.uniform(-RANDOM_OFFSET_RANGE, RANDOM_OFFSET_RANGE)
+                    offset_y = random.uniform(-RANDOM_OFFSET_RANGE, RANDOM_OFFSET_RANGE)
+
+                tx = wx + offset_x
+                ty = wy + offset_y
+
+                print(f"  -> точка {{idx + 1}}/{{len(WAYPOINTS)}}: "
+                      f"базовая ({{wx:.2f}}, {{wy:.2f}}) + смещение ({{offset_x:+.2f}}, {{offset_y:+.2f}}) "
+                      f"= ({{tx:.2f}}, {{ty:.2f}})")
+
+                drone.control.navigate(
+                    x=tx, y=ty, z=ALTITUDE,
+                    yaw=0.0, speed=0.5,
+                    frame_id="map",
+                    auto_arm=False,
+                )
+                time.sleep(3)
+
+            if should_stop and not target_found:
+                print("\\nINTERRUPTED: прерывание, объект не найден")
+                print(f"FINISH: посадка в точку финиша ({{FINISH_X}}, {{FINISH_Y}})...")
+                drone.control.navigate(
+                    x=FINISH_X, y=FINISH_Y, z=ALTITUDE,
+                    yaw=0.0, speed=0.5,
+                    frame_id="map",
+                    auto_arm=False,
+                )
+                time.sleep(3)
+                safe_land()
+                return
+
+        if target_found:
+            wp_coords = found_waypoint_coords
+            print(f"\\n*** ВАЛИДНАЯ НАХОДКА ПОДТВЕРЖДЕНА ***")
+            print(f"Объект на точке с координатами ({{wp_coords[0]:.2f}}, {{wp_coords[1]:.2f}})")
+            print(f"\\nFINISH: посадка в точку финиша ({{FINISH_X}}, {{FINISH_Y}})...")
+            drone.control.navigate(
+                x=FINISH_X, y=FINISH_Y, z=ALTITUDE,
+                yaw=0.0, speed=0.5,
+                frame_id="map",
+                auto_arm=False,
+            )
+            time.sleep(3)
+            safe_land()
+
+    except Exception as e:
+        print(f"FATAL ERROR: {{e}}")
+        import traceback
+        traceback.print_exc()
+        safe_land()
+    finally:
+        print("CLEANUP: завершение работы")
+        try:
+            yolo_model = None
+            drone.close()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    run()
+'''
+
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def main():
+    if len(sys.argv) < 3:
+        print("Использование: python3 test_yolo_search.py <drone_ip> <password>")
+        sys.exit(1)
+
+    drone_ip = sys.argv[1]
+    password = sys.argv[2]
+
+    print(f"[{drone_ip}] Подключение к дрону...")
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    try:
+        ssh.connect(hostname=drone_ip, username=DRONE_USER,
+                    password=password, timeout=30)
+        print(f"[{drone_ip}] Подключено. Загрузка полётной программы...")
+
+        sftp = ssh.open_sftp()
+        remote_script = "/tmp/_yolo_search_test.py"
+        with sftp.open(remote_script, "w") as f:
+            f.write(ONBOARD_SCRIPT)
+        sftp.close()
+
+        print(f"[{drone_ip}] Запуск полётной программы...")
+        stdin, stdout, stderr = ssh.exec_command(f"python3 {remote_script}")
+        out = stdout.read().decode()
+        err = stderr.read().decode()
+        print(out.strip())
+        if err:
+            print(f"STDERR:\n{err.strip()}", file=sys.stderr)
+
+        sftp = ssh.open_sftp()
+        try:
+            sftp.remove(remote_script)
+        except Exception:
+            pass
+        sftp.close()
+
+    finally:
+        ssh.close()
+
+    print(f"[{drone_ip}] Завершено.")
+
+
+if __name__ == "__main__":
+    main()
