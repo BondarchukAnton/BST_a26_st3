@@ -51,9 +51,24 @@ YOLO_CLASS_NAME = "bear"
 # 0.5 = 50%. Ниже — больше ложных срабатываний, выше — можно пропустить объект.
 YOLO_CONFIDENCE = 0.5
 
+# === Модель ===
+
+# Путь к файлу модели НА ТВОЁМ ПК (.pt / .onnx / .engine).
+# Если задан — файл будет загружен на дрон по SFTP и использован.
+# Если None — используется модель уже на дроне, либо авто-скачивание YOLO_MODEL_NAME.
+# Поддерживаются все форматы ultralytics: .pt, .onnx, .engine, .tflite
+#   LOCAL_MODEL_PATH = "models/best.pt"          # PyTorch
+#   LOCAL_MODEL_PATH = "models/best_int8.onnx"   # ONNX (экспортирован из test_train_yolo.py)
 LOCAL_MODEL_PATH = None
+
+# Папка и имя файла модели на дроне (старая удаляется при загрузке новой)
 DRONE_MODEL_DIR = "/home/sverk/yolo_models"
 DRONE_MODEL_NAME = "yolo_model.pt"
+
+# Имя модели для АВТО-СКАЧИВАНИЯ.
+# Используется ТОЛЬКО если LOCAL_MODEL_PATH = None и на дроне нет файла.
+#   yolo11n.pt — nano (2.6M), yolo11s.pt — small (9.4M)
+YOLO_MODEL_NAME = "yolo11n.pt"
 
 VLM_API_KEY = "sk-jkx31e2PLKxCpjOynEwyxA"
 VLM_API_BASE = "https://ai.sverk.tech/v1"
@@ -88,9 +103,9 @@ RANDOM_OFFSET_RANGE = {RANDOM_OFFSET_RANGE}
 WAYPOINT_PROXIMITY_THRESHOLD = {WAYPOINT_PROXIMITY_THRESHOLD}
 DRONE_MODEL_DIR = "{DRONE_MODEL_DIR}"
 DRONE_MODEL_NAME = "{DRONE_MODEL_NAME}"
-YOLO_CLASS_NAME = "{YOLO_CLASS_NAME}"
+YOLO_CLASS_NAME = {repr(YOLO_CLASS_NAME)}
 YOLO_CONFIDENCE = {YOLO_CONFIDENCE}
-MODEL_UPLOADED = {json.dumps(LOCAL_MODEL_PATH is not None)}
+MODEL_UPLOADED = {LOCAL_MODEL_PATH is not None}
 VLM_API_KEY = "{VLM_API_KEY}"
 VLM_API_BASE = "{VLM_API_BASE}"
 VLM_MODEL = "{VLM_MODEL}"

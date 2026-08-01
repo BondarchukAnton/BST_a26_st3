@@ -40,7 +40,28 @@ RANDOM_OFFSET_RANGE = 0.3
 # Нужно чтобы не реагировать на объекты за пределами зоны поиска.
 WAYPOINT_PROXIMITY_THRESHOLD = 0.5
 
-# Имя YOLO-модели. ultralytics автоматически скачает при первом запуске.
+# === Модель ===
+
+# Путь к файлу модели НА ЭТОМ КОМПЬЮТЕРЕ (.pt / .onnx / .engine).
+# Если задан — файл будет загружен на дрон по SFTP и использован.
+# Поддерживаются все форматы ultralytics: .pt, .onnx, .engine, .tflite и др.
+#   Примеры:
+#     LOCAL_MODEL_PATH = "models/best.pt"         # PyTorch
+#     LOCAL_MODEL_PATH = "models/best_int8.onnx"  # ONNX (быстрее на CPU)
+#     LOCAL_MODEL_PATH = "models/best_fp16.engine" # TensorRT (макс. скорость на GPU)
+LOCAL_MODEL_PATH = None
+
+# Папка на дроне, куда кладётся модель
+DRONE_MODEL_DIR = "/home/sverk/yolo_models"
+
+# Имя файла модели на дроне (старая удаляется при загрузке новой)
+DRONE_MODEL_NAME = "yolo_model.pt"
+
+# Имя модели для АВТО-СКАЧИВАНИЯ через ultralytics.
+# Используется ТОЛЬКО если LOCAL_MODEL_PATH = None И модели нет на дроне.
+#   yolo11n.pt — nano (2.6M, самая быстрая)
+#   yolo11s.pt — small (9.4M)
+#   yolo11m.pt — medium (20M)
 YOLO_MODEL_NAME = "yolo11n.pt"
 
 # Класс для поиска. Возможные значения:
@@ -48,17 +69,11 @@ YOLO_MODEL_NAME = "yolo11n.pt"
 #   "bear"   — медведь (COCO class 21)
 #   "teddy bear" — плюшевый медведь (COCO class 77)
 #   Если модель дообучена на 1 класс — укажи имя этого класса из твоего dataset.yaml
-YOLO_CLASS_NAME = None
+YOLO_CLASS_NAME = "bear"
 
 # Минимальная уверенность (confidence) для засчитывания детекции.
 # 0.5 = 50%. Ниже — больше ложных срабатываний, выше — можно пропустить объект.
 YOLO_CONFIDENCE = 0.5
-
-# Путь к модели НА ЭТОМ КОМПЬЮТЕРЕ. Если None — используется модель уже на дроне.
-# Если задан — модель будет загружена на дрон и заменит старую.
-LOCAL_MODEL_PATH = None         # например: "models/bear.pt"
-DRONE_MODEL_DIR = "/home/sverk/yolo_models"      # папка с моделями на дроне
-DRONE_MODEL_NAME = "yolo_model.pt"               # имя файла модели на дроне
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # БОРТОВОЙ СКРИПТ
@@ -87,9 +102,9 @@ RANDOM_OFFSET_RANGE = {RANDOM_OFFSET_RANGE}
 WAYPOINT_PROXIMITY_THRESHOLD = {WAYPOINT_PROXIMITY_THRESHOLD}
 DRONE_MODEL_DIR = "{DRONE_MODEL_DIR}"
 DRONE_MODEL_NAME = "{DRONE_MODEL_NAME}"
-YOLO_CLASS_NAME = "{YOLO_CLASS_NAME}"
+YOLO_CLASS_NAME = {repr(YOLO_CLASS_NAME)}
 YOLO_CONFIDENCE = {YOLO_CONFIDENCE}
-MODEL_UPLOADED = {json.dumps(LOCAL_MODEL_PATH is not None)}
+MODEL_UPLOADED = {LOCAL_MODEL_PATH is not None}
 
 drone = None
 yolo_model = None
