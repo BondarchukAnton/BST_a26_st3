@@ -307,7 +307,7 @@ def main():
         sftp.close()
 
         print(f"[{drone_ip}] Запуск полётной программы...")
-        stdin, stdout, stderr = ssh.exec_command(f"python3 {remote_script}")
+        stdin, stdout, stderr = ssh.exec_command(f"source ~/sverk_ws/install/setup.bash && python3 {remote_script}")
         out = stdout.read().decode()
         err = stderr.read().decode()
         print(out.strip())
