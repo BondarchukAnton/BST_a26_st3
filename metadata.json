@@ -1,6 +1,0 @@
-{
-  "name": "Autonomous Rover Drone Mission Control",
-  "description": "Cyberdrom Rover & Drone AruCo Map Autonomous Navigation & Enemy Dodge System",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
