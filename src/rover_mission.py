@@ -276,13 +276,11 @@ def run_rover_mission(target_x: int, target_y: int, log=None) -> dict:
                 log.info("ровер", "СЦЕНАРИЙ А: чепуха (5, 2)")
             print("\n=== Сценарий А: чепуха (5, 2) ===")
             _ssh_run(ssh, [
-                f'source "{ROVER_CD_PATH}/install/setup.zsh"',
                 _goal_cell(6, 2, yaw=270),
                 _goal_cell(5, 2, yaw=270),
             ], log=log)
             target_coord = _spin_and_shoot(ssh, 5, 2, log=log)
             _ssh_run(ssh, [
-                f'source "{ROVER_CD_PATH}/install/setup.zsh"',
                 _goal_cell(5, 2, yaw=90),
                 _goal_cell(6, 2, yaw=0),
                 _goal_cell(6, 4, yaw=0),
@@ -294,13 +292,11 @@ def run_rover_mission(target_x: int, target_y: int, log=None) -> dict:
                 log.info("ровер", "СЦЕНАРИЙ Б: чепуха (1, 1)")
             print("\n=== Сценарий Б: чепуха (1, 1) ===")
             _ssh_run(ssh, [
-                f'source "{ROVER_CD_PATH}/install/setup.zsh"',
                 _goal_cell(6, 4, yaw=0),
                 _goal_cell(1, 1, yaw=270),
             ], log=log)
             target_coord = _spin_and_shoot(ssh, 1, 1, log=log)
             _ssh_run(ssh, [
-                f'source "{ROVER_CD_PATH}/install/setup.zsh"',
                 _goal_cell(1, 1, yaw=90),
                 _goal_cell(2, 1, yaw=0),
                 _goal_cell(1, 4, yaw=0),
@@ -320,7 +316,6 @@ def run_rover_mission(target_x: int, target_y: int, log=None) -> dict:
                 log.rover_arrived(f"({t_col}, {t_row})")
             print(f"\n=== Едем на финишную клетку ({t_col}, {t_row}) ===")
             _ssh_run(ssh, [
-                f'source "{ROVER_CD_PATH}/install/setup.zsh"',
                 _goal_cell(t_col, t_row, yaw=0),
             ], log=log)
         else:

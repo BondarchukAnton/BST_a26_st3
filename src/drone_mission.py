@@ -15,6 +15,7 @@ import time
 import datetime
 import paramiko
 
+
 from config.settings import (
     ALTITUDE, SPEED, SEARCH_DURATION, RANDOM_OFFSET_RANGE,
     WAYPOINT_A1, WAYPOINT_E2, WAYPOINTS, WAYPOINT_NAMES,
@@ -74,6 +75,8 @@ try:
     HAS_ARUCO_MSG = True
 except ImportError:
     HAS_ARUCO_MSG = False
+
+from rclpy.qos import qos_profile_sensor_data
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ПАРАМЕТРЫ МИССИИ (подставлены с хоста)
@@ -384,8 +387,11 @@ def aruco_land_on_rover():
         safe_land()
         return False
 
-    print("[ARUCO] подписка на /aruco/det/markers ...")
-    drone.topic.subscribe(MarkerArray, '/aruco/det/markers', aruco_callback)
+    print("[ARUCO] подписка на /aruco/det/markers (BEST_EFFORT QoS) ...")
+    try:
+        drone.topic.subscribe(MarkerArray, '/aruco/det/markers', aruco_callback, qos_profile=qos_profile_sensor_data)
+    except Exception:
+        drone.node.create_subscription(MarkerArray, '/aruco/det/markers', aruco_callback, qos_profile_sensor_data)
     time.sleep(1.0)
 
     print("[ARUCO] определение разрешения камеры...")
@@ -489,7 +495,7 @@ def run():
         print(f"[TAKEOFF] взлёт на {{ALTITUDE}} м...")
         t0 = time.time()
         drone.control.navigate(
-            x=0.0, y=0.0, z=2.0,
+            x=0.0, y=0.0, z=1.7,
             yaw=0.0, speed=0.7,
             frame_id="body", auto_arm=True,
         )
