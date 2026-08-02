@@ -81,12 +81,13 @@ YOLO_MODEL_NAME = "yolo11n.pt"          # Имя модели (если не з�
 YOLO_CLASS_NAME = None                   # Имя класса (None — любой)
 YOLO_CONFIDENCE = 0.5                    # Порог уверенности
 
-# Путь к своей обученной модели (None — использовать yolo11n.pt)
-LOCAL_MODEL_PATH = (
-    r"C:\Users\slava\Desktop\code_new_top\BST_a26_st3-master\BST_a26_st3-master\best.pt"
-    if os.name == "nt"
-    else os.environ.get("LOCAL_MODEL_PATH", None)
+# Путь к своей обученной модели (None — авто-скачать yolo11n.pt)
+# По умолчанию используется best.pt из корня проекта.
+# Переопределить: export LOCAL_MODEL_PATH="/путь/к/модели.pt"
+_LOCAL_DEFAULT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "best.pt"
 )
+LOCAL_MODEL_PATH = os.environ.get("LOCAL_MODEL_PATH", _LOCAL_DEFAULT)
 DRONE_MODEL_DIR = "/home/sverk/yolo_models"
 DRONE_MODEL_NAME = "yolo_model.pt"
 
