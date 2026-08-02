@@ -733,6 +733,7 @@ def run_drone_mission(logger=None) -> DroneResult:
             "bash -c 'source ~/sverk_ws/install/setup.bash && "
             "ros2 param set /aruco_detect pnp_non_map_markers true; "
             "ros2 param set /aruco_detect estimate_marker_pose true'",
+            "ros2 param set /aruco_detect dictionary DICT_4X4_1000'",
             get_pty=True,
         )
         time.sleep(1.0)
