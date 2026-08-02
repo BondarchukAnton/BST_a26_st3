@@ -371,9 +371,23 @@ def aruco_callback(msg):
     global last_marker_pose, last_detection_time, marker_found_once
     for marker in msg.markers:
         if marker.id == ROVER_ARUCO_ID:
+            # Универсальное извлечение координат центра метки
+            if hasattr(marker, 'center_x') and hasattr(marker, 'center_y'):
+                cx, cy = marker.center_x, marker.center_y
+            elif hasattr(marker, 'center'):
+                cx, cy = marker.center.x, marker.center.y
+            elif hasattr(marker, 'x') and hasattr(marker, 'y'):
+                cx, cy = marker.x, marker.y
+            elif hasattr(marker, 'pose'):
+                cx, cy = marker.pose.position.x, marker.pose.position.y
+            else:
+                print(f"[ARUCO_ERR] Неизвестная структура Marker: {dir(marker)}")
+                break
+
             if not marker_found_once:
                 print(f"[ARUCO_DET] 🎯 Целевая метка ROVER_ARUCO_ID={ROVER_ARUCO_ID} ЗАФИКСИРОВАНА!")
-            last_marker_pose = (marker.center_x, marker.center_y)
+
+            last_marker_pose = (cx, cy)
             last_detection_time = time.time()
             marker_found_once = True
             break
@@ -732,9 +746,9 @@ def run_drone_mission(logger=None) -> DroneResult:
         ssh.exec_command(
             "bash -c 'source ~/sverk_ws/install/setup.bash && "
             "ros2 param set /aruco_detect pnp_non_map_markers true; "
-            "ros2 param set /aruco_detect estimate_marker_pose true'",
+            "ros2 param set /aruco_detect estimate_marker_pose true; "
             "ros2 param set /aruco_detect dictionary DICT_4X4_1000'",
-            get_pty=True,
+            get_pty=True,  # <-- Именованный аргумент булева типа (без кавычек)
         )
         time.sleep(1.0)
 
