@@ -84,7 +84,7 @@ RANDOM_OFFSET_RANGE = {RANDOM_OFFSET_RANGE}
 WAYPOINTS = {json.dumps(WAYPOINTS)}
 DRONE_MODEL_DIR = "{DRONE_MODEL_DIR}"
 DRONE_MODEL_NAME = "{DRONE_MODEL_NAME}"
-YOLO_CLASS_NAME = {json.dumps(YOLO_CLASS_NAME)}
+YOLO_CLASS_NAME = {repr(YOLO_CLASS_NAME)}
 YOLO_CONFIDENCE = {YOLO_CONFIDENCE}
 MODEL_UPLOADED = {has_local_model}
 VLM_API_KEY = "{VLM_API_KEY}"
@@ -686,11 +686,18 @@ def run_drone_mission(logger=None) -> DroneResult:
 
         # Запуск
         if log:
+            log.info("координатор", "установка параметров ArUco на дроне...")
+            log.info("координатор",
+                     "ros2 param set /aruco_detect pnp_non_map_markers=true "
+                     "estimate_marker_pose=true")
             log.info("координатор", "ЗАПУСК БОРТОВОГО СКРИПТА ДРОНА")
             log.start_phase(1, "ПОИСК ОБЪЕКТА + ПОСАДКА НА РОВЕР")
 
         stdin, stdout, stderr = ssh.exec_command(
-            f"bash -c 'source ~/sverk_ws/install/setup.bash && python3 {remote_script}'",
+            f"bash -c 'source ~/sverk_ws/install/setup.bash && "
+            f"ros2 param set /aruco_detect pnp_non_map_markers true && "
+            f"ros2 param set /aruco_detect estimate_marker_pose true && "
+            f"python3 {remote_script}'",
             get_pty=True,
         )
 
