@@ -43,21 +43,38 @@ GEMMA_PROMPT = (
 
 
 def _take_photo(filename: str, log=None) -> dict:
-    """Снимает фото с камеры ровера через HTTP API."""
+    """Снимает фото с камеры ровера через HTTP API с повторными попытками."""
     os.makedirs(os.path.dirname(filename) or ".", exist_ok=True)
-    req = Request(
-        f"{_rover_web_url()}/api/camera/frame?topic=/image_raw&type=sensor_msgs/msg/Image",
-        headers={"Accept": "image/jpeg"},
-    )
-    with urlopen(req, timeout=10) as resp:
-        data = resp.read()
-        with open(filename, "wb") as f:
-            f.write(data)
-    if log:
-        log.info("ровер", f"фото сохранено: {filename} ({len(data)} байт)")
-    else:
-        print(f"[PHOTO] {filename} ({len(data)} bytes)")
-    return {"ok": True, "file": filename, "size_bytes": len(data)}
+
+    for attempt in range(1, 6):
+        try:
+            req = Request(
+                f"{_rover_web_url()}/api/camera/frame?topic=/image_raw&type=sensor_msgs/msg/Image",
+                headers={"Accept": "image/jpeg"},
+            )
+            with urlopen(req, timeout=10) as resp:
+                data = resp.read()
+                with open(filename, "wb") as f:
+                    f.write(data)
+
+            if log:
+                log.info("ровер", f"фото сохранено: {filename} ({len(data)} байт)")
+            else:
+                print(f"[PHOTO] {filename} ({len(data)} bytes)")
+
+            return {"ok": True, "file": filename, "size_bytes": len(data)}
+
+        except Exception as e:
+            msg = f"[PHOTO] попытка {attempt}/5 не удалась: {e}"
+            if log:
+                log.info("ровер", msg)
+            else:
+                print(msg)
+
+            if attempt < 5:
+                time.sleep(0.5)
+
+    raise RuntimeError("Не удалось сделать фото после 5 попыток")
 
 
 def _set_led(enabled: bool, brightness: float, effect: str, color: str,

@@ -368,6 +368,8 @@ def aruco_callback(msg):
     global last_marker_pose, last_detection_time, marker_found_once
     for marker in msg.markers:
         if marker.id == ROVER_ARUCO_ID:
+            if not marker_found_once:
+                print(f"[ARUCO_DET] 🎯 Целевая метка ROVER_ARUCO_ID={ROVER_ARUCO_ID} ЗАФИКСИРОВАНА!")
             last_marker_pose = (marker.center_x, marker.center_y)
             last_detection_time = time.time()
             marker_found_once = True
@@ -383,7 +385,7 @@ def aruco_land_on_rover():
         return False
 
     print("[ARUCO] подписка на /aruco/det/markers ...")
-    drone.subscribe('/aruco/det/markers', MarkerArray, aruco_callback)
+    drone.topic.subscribe(MarkerArray, '/aruco/det/markers', aruco_callback)
     time.sleep(1.0)
 
     print("[ARUCO] определение разрешения камеры...")
@@ -437,8 +439,9 @@ def aruco_land_on_rover():
         shift_x = -dy_px * m_per_px * ARUCO_KP
         shift_y = -dx_px * m_per_px * ARUCO_KP
 
-        print(f"[ARUCO] высота: {{current_z:.2f}}м | ошибка PX: ({{dx_px:.1f}}, {{dy_px:.1f}}) | "
-              f"коррекция (м): X={{shift_x:.2f}}, Y={{shift_y:.2f}}")
+        print(f"[ARUCO_TRACK] Метка ID={{ROVER_ARUCO_ID}} в кадре (cx={{cx_px:.0f}}, cy={{cy_px:.0f}}) | "
+            f"Высота: {{current_z:.2f}}м | Ошибка PX: ({{dx_px:.1f}}, {{dy_px:.1f}}) | "
+            f"Коррекция body (м): X={{shift_x:.2f}}, Y={{shift_y:.2f}}")
 
         if abs(dx_px) < CENTER_TOLERANCE_PX and abs(dy_px) < CENTER_TOLERANCE_PX:
             print(f"[ARUCO] центрирование достигнуто (ошибка < {{CENTER_TOLERANCE_PX}}px). снижение...")
