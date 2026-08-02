@@ -27,6 +27,7 @@ from config.settings import (
     ARUCO_STEP_DOWN,
     FLY_TO_ROVER_SPEED, LED_DURATION,
     TAKEOFF_SETTLE_TIME, FLY_SETTLE_TIME,
+    POST_TAKEOFF_SLEEP,
     DRONE_IP, DRONE_USER, DRONE_PASSWORD,
 )
 
@@ -96,6 +97,7 @@ ROVER_Y = {rvy}
 FLY_TO_ROVER_SPEED = {FLY_TO_ROVER_SPEED}
 LED_DURATION = {LED_DURATION}
 TAKEOFF_SETTLE_TIME = {TAKEOFF_SETTLE_TIME}
+POST_TAKEOFF_SLEEP = {POST_TAKEOFF_SLEEP}
 FLY_SETTLE_TIME = {FLY_SETTLE_TIME}
 
 # Параметры ArUco-посадки
@@ -261,7 +263,18 @@ def search_at_point(current_point):
     t0 = time.time()
     frames_ok = 0
     last_report = 0
+    last_aruco_log = 0
     while time.time() - t0 < SEARCH_DURATION and not target_found and not should_stop:
+        if time.time() - last_aruco_log > 3.0:
+            try:
+                t = drone.control.get_telemetry(frame_id="aruco_map")
+                if t.x == t.x:
+                    print(f"  [ARUCO] map OK  pos=({{t.x:.1f}},{{t.y:.1f}})  z={{t.z:.2f}}m")
+                else:
+                    print(f"  [ARUCO] map LOST")
+            except Exception:
+                print(f"  [ARUCO] error")
+            last_aruco_log = time.time()
         frame = drone.image.take_picture(timeout=1.0)
         if frame is not None:
             frames_ok += 1
@@ -271,12 +284,24 @@ def search_at_point(current_point):
                 cv2.imwrite("/tmp/cheburashka_found.jpg", frame)
                 print(f"[DETECT_PHOTO]/tmp/cheburashka_found.jpg")
                 print(f"[DETECT] синий LED {{LED_DURATION:.0f}} сек...")
+                led_error = None
                 try:
-                    drone.led.set_effect("fill", r=0, g=0, b=255)
-                    time.sleep(LED_DURATION)
-                    drone.led.set_effect("fill", r=0, g=0, b=0) if drone.led else None
+                    import rclpy as _rclpy_led
+                    from led_interfaces.srv import SetLEDEffect
+                    client = drone.node.create_client(SetLEDEffect, '/led_control/set_effect')
+                    if client.wait_for_service(timeout_sec=1.0):
+                        req = SetLEDEffect.Request()
+                        req.effect = "fill"; req.r = 0; req.g = 0; req.b = 255
+                        future = client.call_async(req)
+                        _rclpy_led.spin_until_future_complete(drone.node, future, timeout_sec=2.0)
+                        time.sleep(LED_DURATION)
+                        req.r = 0; req.g = 0; req.b = 0
+                        future = client.call_async(req)
+                        _rclpy_led.spin_until_future_complete(drone.node, future, timeout_sec=2.0)
                 except Exception as e:
-                    print(f"[DETECT] LED error: {{e}}")
+                    led_error = str(e)
+                if led_error:
+                    print(f"[DETECT] LED error: {{led_error}}")
                 elapsed = time.time() - t0
                 print(f"\\n[DETECT] *** ОБЪЕКТ НАЙДЕН ***")
                 print(f"[DETECT] точка: ({{wx:.3f}}, {{wy:.3f}})")
@@ -362,14 +387,19 @@ def aruco_land_on_rover():
     time.sleep(1.0)
 
     print("[ARUCO] определение разрешения камеры...")
+    frame_w = 640
+    frame_h = 480
     try:
         cam_img = drone.camera.read_numpy()
         frame_h, frame_w = cam_img.shape[:2]
-        print(f"[ARUCO] разрешение кадра: {{frame_w}}x{{frame_h}}")
     except Exception:
-        frame_w = 640
-        frame_h = 480
-        print(f"[ARUCO] разрешение по умолчанию: {{frame_w}}x{{frame_h}}")
+        try:
+            cam_img = drone.image.take_picture(timeout=2.0)
+            if cam_img is not None:
+                frame_h, frame_w = cam_img.shape[:2]
+        except Exception:
+            pass
+    print(f"[ARUCO] разрешение кадра: {{frame_w}}x{{frame_h}}")
 
     print(f"[ARUCO] поиск метки ID {{ROVER_ARUCO_ID}}...")
     current_z = SEARCH_ALTITUDE
@@ -456,14 +486,16 @@ def run():
         print(f"[TAKEOFF] взлёт на {{ALTITUDE}} м...")
         t0 = time.time()
         drone.control.navigate(
-            x=0.0, y=0.0, z=ALTITUDE,
+            x=0.0, y=0.0, z=2.0,
             yaw=0.0, speed=0.7,
             frame_id="body", auto_arm=True,
         )
         print(f"[TAKEOFF] команда отправлена ({{time.time() - t0:.1f}} сек), "
               f"ожидание {{TAKEOFF_SETTLE_TIME:.0f}} сек...")
         time.sleep(TAKEOFF_SETTLE_TIME)
-        print("[TAKEOFF] взлёт выполнен")
+        t = drone.control.get_telemetry(frame_id="body")
+        print(f"[TAKEOFF] взлёт выполнен, высота: z={{t.z:.2f}} м")
+        time.sleep(POST_TAKEOFF_SLEEP)
 
         if should_stop:
             safe_land()
@@ -685,18 +717,24 @@ def run_drone_mission(logger=None) -> DroneResult:
             log.info("координатор", "скрипт загружен")
 
         # Запуск
+        # Установка параметров ArUco (не блокирует запуск при ошибке)
         if log:
             log.info("координатор", "установка параметров ArUco на дроне...")
-            log.info("координатор",
-                     "ros2 param set /aruco_detect pnp_non_map_markers=true "
-                     "estimate_marker_pose=true")
+        ssh.exec_command(
+            "bash -c 'source ~/sverk_ws/install/setup.bash && "
+            "ros2 param set /aruco_detect pnp_non_map_markers true; "
+            "ros2 param set /aruco_detect estimate_marker_pose true'",
+            get_pty=True,
+        )
+        time.sleep(1.0)
+
+        # Запуск бортового скрипта
+        if log:
             log.info("координатор", "ЗАПУСК БОРТОВОГО СКРИПТА ДРОНА")
             log.start_phase(1, "ПОИСК ОБЪЕКТА + ПОСАДКА НА РОВЕР")
 
         stdin, stdout, stderr = ssh.exec_command(
             f"bash -c 'source ~/sverk_ws/install/setup.bash && "
-            f"ros2 param set /aruco_detect pnp_non_map_markers true && "
-            f"ros2 param set /aruco_detect estimate_marker_pose true && "
             f"python3 {remote_script}'",
             get_pty=True,
         )

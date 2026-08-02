@@ -248,7 +248,7 @@ def run_rover_mission(target_x: int, target_y: int, log=None) -> dict:
         print("=== Стартовый маршрут ===")
         _ssh_run(ssh, [
             f'source "{ROVER_CD_PATH}/install/setup.zsh"',
-            _initial_cell(6, 1, yaw=0),
+            _initial_cell(4, 1, yaw=90),
             _goal_cell(6, 1, yaw=0),
             _goal_cell(6, 2, yaw=0),
         ], log=log)
